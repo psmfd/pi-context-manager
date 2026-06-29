@@ -7,6 +7,14 @@ never changes turn-over-turn and provider prompt caching stays hot. Part of the
 Pi Extension Suite (#327); consumes the [`shared/`](https://github.com/psmfd/pi-config/blob/main/agent/extensions/shared/README.md)
 foundation. See [ADR-0032](https://github.com/psmfd/pi-config/blob/main/adrs/0032-context-manager.md).
 
+## Install
+
+```sh
+pi install git:github.com/psmfd/pi-context-manager
+```
+
+Try it first without installing: `pi -e git:github.com/psmfd/pi-context-manager`.
+
 ## Why custom (not an adopted extension)
 
 Both maintained candidates were rejected at inspection because their core
