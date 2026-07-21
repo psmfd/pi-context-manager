@@ -13,7 +13,7 @@ async function tmpAgentDir(): Promise<string> {
 
 test("save then load round-trips state", async () => {
   const dir = await tmpAgentDir();
-  const value = { enabled: true, maxResultBytes: 8000 };
+  const value = { enabled: true, maxResultChars: 8000 };
   await save(value, dir);
   assert.deepEqual(await load(dir), value);
 });
@@ -23,20 +23,30 @@ test("load returns the default when no state file exists", async () => {
   assert.deepEqual(await load(dir), DEFAULT_STATE);
 });
 
-test("load repairs a non-positive maxResultBytes to the default", async () => {
+test("load repairs a non-positive maxResultChars to the default", async () => {
   const dir = await tmpAgentDir();
-  await saveState("context-manager", { enabled: true, maxResultBytes: 0 }, dir);
+  await saveState("context-manager", { enabled: true, maxResultChars: 0 }, dir);
   const loaded = await load(dir);
   assert.equal(loaded.enabled, true);
-  assert.equal(loaded.maxResultBytes, DEFAULT_STATE.maxResultBytes);
+  assert.equal(loaded.maxResultChars, DEFAULT_STATE.maxResultChars);
 });
 
-test("load repairs a too-small maxResultBytes (below head+tail keep) to the default", async () => {
+test("load repairs a too-small maxResultChars (below head+tail keep) to the default", async () => {
   const dir = await tmpAgentDir();
   // 100 is > 0 but can never elide (< HEAD_KEEP + TAIL_KEEP) — must be repaired.
-  await saveState("context-manager", { enabled: true, maxResultBytes: 100 }, dir);
+  await saveState("context-manager", { enabled: true, maxResultChars: 100 }, dir);
   const loaded = await load(dir);
-  assert.equal(loaded.maxResultBytes, DEFAULT_STATE.maxResultBytes);
+  assert.equal(loaded.maxResultChars, DEFAULT_STATE.maxResultChars);
+});
+
+test("load adopts a legacy maxResultBytes value (#804 back-compat rename)", async () => {
+  const dir = await tmpAgentDir();
+  // Pre-rename state files persisted the cap under `maxResultBytes`; it always
+  // measured chars, so a tuned value must carry over, not reset to default.
+  await saveState("context-manager", { enabled: true, maxResultBytes: 8000 }, dir);
+  const loaded = await load(dir);
+  assert.equal(loaded.enabled, true);
+  assert.equal(loaded.maxResultChars, 8000);
 });
 
 test("FreezeMap stores, overwrites, and clears decisions", () => {

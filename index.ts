@@ -47,13 +47,17 @@ export default function contextManager(pi: ExtensionAPI): void {
       if (sub === "on" || sub === "off") {
         cfg = { ...cfg, enabled: sub === "on" };
         await state.save(cfg);
+      } else if (sub !== "" && sub !== "status") {
+        // A typo (`/prune onn`) must not silently read as a status query.
+        ctx.ui.notify(`context-manager: unknown action '${sub}' — use /prune [on|off|status]`, "warning");
+        return;
       }
       const flagOn = pi.getFlag("prune") === true;
       const active = cfg.enabled || flagOn;
       const usage = getUsage(ctx as unknown as UsageContext);
       ctx.ui.notify(
         `context-manager: ${active ? "ON" : "OFF"}${flagOn && !cfg.enabled ? " (via --prune)" : ""}; ` +
-          `cap=${cfg.maxResultBytes} chars/result; ` +
+          `cap=${cfg.maxResultChars} chars/result; ` +
           `usage=${usage ? `${Math.round(usage.pct * 100)}% (${usage.level})` : "unknown"}`,
         "info",
       );
@@ -69,7 +73,7 @@ export default function contextManager(pi: ExtensionAPI): void {
       const result = applyPrune(
         event.messages as unknown as AnyMessage[],
         level,
-        cfg.maxResultBytes,
+        cfg.maxResultChars,
         frozen,
       );
       // Decisions are frozen as a side effect every enabled turn; only return a

@@ -47,11 +47,95 @@ as it arrives.
 Only `toolResult` **content** is rewritten — the message and its `toolCallId`
 always remain, so tool-call/result pairing is never broken.
 
+The elision marker names the tool it replaced (`elided N chars from <toolName>`).
+Because a tool name is attacker-influenceable (a dynamically-registered or
+malicious tool could embed newlines or brackets), `toolName` is **sanitized**
+before it is interpolated into that model-visible marker — control and bracket
+characters are stripped and the length is bounded — so a crafted name cannot
+break out of the annotation and plant text the model reads as an instruction
+(LLM01, indirect prompt injection; `prune.ts`).
+
+```mermaid
+flowchart TD
+    A["context event (before each LLM call)"] --> B{"enabled OR --prune?"}
+    B -- No --> Z1["return undefined — original messages"]
+    B -- Yes --> C["getUsage(ctx)"]
+    C --> D{"usage available?"}
+    D -- "No (null)" --> E["level = null → headroom, never prunes"]
+    D -- Yes --> F["level = classify(pct)"]
+    E --> G["for each message"]
+    F --> G
+    G --> H{"role == toolResult?"}
+    H -- No --> I["pass through"]
+    H -- Yes --> J{"frozen decision exists?"}
+    J -- Yes --> Q{"decision == pruned?"}
+    J -- No --> L{"gateOpen(level)?"}
+    L -- No --> M["decision = full"]
+    L -- Yes --> N{"textLength > maxResultChars?"}
+    N -- No --> M
+    N -- Yes --> O["decision = pruned"]
+    M --> P["freeze(toolCallId) — sticky for the session"]
+    O --> P
+    P --> Q
+    Q -- No --> I
+    Q -- Yes --> R{"joined length <= HEAD_KEEP + TAIL_KEEP?"}
+    R -- Yes --> I
+    R -- No --> S["elide to head + marker + tail; sanitize toolName (LLM01 guard)"]
+    S --> U["accumulate prunedCount / savedChars"]
+    I --> U
+    U --> V{"prunedCount == 0?"}
+    V -- Yes --> Z1
+    V -- No --> W["return { messages: rewritten }"]
+```
+
 ## Hooks & coexistence
 
-`context` only (plus `session_start` for state restore). **No** `before_agent_start`
-(auto-router's) and **no** `agent_end` (indexing's) → zero collision with the rest
-of the suite. No LLM calls → zero extra tokens.
+`context` only (plus `session_start` for state restore). It shares no hook with
+any other Pi Extension Suite member — the others fire on `before_agent_start`
+(auto-router), `agent_end` (indexing), `session_before_compact`/`session_compact`
+(compaction-optimizer), or `before_provider_request` (payload-tuner, ADR-0106) —
+so there is no cross-extension collision. No LLM calls → zero extra tokens. The
+`context` handler wraps its work in try/catch and returns the original messages
+unchanged on any error, so a future SDK message-shape change degrades to a no-op
+(logged) rather than breaking the turn.
+
+```mermaid
+sequenceDiagram
+    participant Pi as Pi runtime
+    participant CM as context-manager (index.ts)
+    participant Sig as shared/signals.ts
+    participant St as shared/state.ts (fs)
+    participant UI as status bar / notify
+    participant User as User
+
+    Pi->>CM: session_start
+    CM->>St: loadState("context-manager", DEFAULT_STATE)
+    St-->>CM: { enabled, maxResultChars }
+    CM->>CM: frozen.clear()
+    CM->>UI: setStatus(prune on/off)
+
+    User->>CM: /prune on | off | status
+    alt on/off
+        CM->>St: saveState(cfg)
+    end
+    CM->>Sig: getUsage(ctx)
+    CM->>UI: notify(ON/OFF; cap=N chars/result; usage=X%)
+
+    Pi->>CM: context(event.messages) — before every LLM call
+    alt disabled and --prune not set
+        CM-->>Pi: undefined (messages unchanged)
+    else enabled
+        CM->>Sig: getUsage(ctx)
+        Sig-->>CM: level (ok/prune/escalate/force) or null
+        CM->>CM: applyPrune(messages, level, cap, frozen)
+        alt prunedCount == 0
+            CM-->>Pi: undefined (no-op path)
+        else prunedCount > 0
+            CM-->>Pi: { messages: rewritten }
+        end
+        Note over CM: try/catch — any error logs and returns undefined; a turn is never broken
+    end
+```
 
 ## Controls
 
@@ -66,11 +150,15 @@ Status bar: `✂️ prune on` / `✂️ prune off`.
 ## State
 
 `~/.pi/agent/extensions/context-manager/state.json`, schema-versioned (`{v:1}`):
-`{ enabled, maxResultBytes }`. `maxResultBytes` (default `12000`) is the per-result
-text-length cap; a result over it, seen under pressure, is elided to the first
-`HEAD_KEEP` (2000) + last `TAIL_KEEP` (2000) chars. The freeze map is in-memory
-only — a `/reload` re-derives decisions against current usage (one bounded cache
-event; pairing always preserved).
+`{ enabled, maxResultChars }`. `maxResultChars` (default `12000`) is the per-result
+cap measured in **characters** (JS string `.length`, UTF-16 code units — not
+bytes); a result over it, seen under pressure, is elided to the first `HEAD_KEEP`
+(2000) + last `TAIL_KEEP` (2000) chars. (The field was named `maxResultBytes`
+before #804 corrected it; `load()` still adopts a legacy `maxResultBytes` value so
+a tuned state file is not reset on upgrade.) A hand-edited cap below
+`HEAD_KEEP + TAIL_KEEP` — which could never elide — is repaired to the default on
+load. The freeze map is in-memory only — a `/reload` re-derives decisions against
+current usage (one bounded cache event; pairing always preserved).
 
 ## Files
 
@@ -82,6 +170,55 @@ event; pairing always preserved).
 | `state.ts` | Persisted toggle/cap + in-memory `FreezeMap`. |
 | `types.ts` | Structural `ToolResultMessage` / `AnyMessage` shapes the pruner reads. |
 
+Module structure, the shared-library and pinned-API dependencies, the on-disk
+artifact, and the mirror distribution path:
+
+```mermaid
+graph TD
+    subgraph CMEXT ["context-manager"]
+        IDX["index.ts (context, /prune, --prune, status)"]
+        POL["policy.ts (gateOpen, isOversized, decide)"]
+        PRU["prune.ts (pruneToolResult, applyPrune)"]
+        STA["state.ts (load/save, MIN_RESULT_CHARS guard, FreezeMap)"]
+        TYP["types.ts (ToolResultMessage, AnyMessage)"]
+    end
+    subgraph SHARED ["shared/ (ADR-0030, no index.ts, not auto-loaded)"]
+        SIG["signals.ts — getUsage, classify, PRUNE_AT=0.70"]
+        SHS["state.ts — loadState/saveState, schema v1"]
+    end
+    subgraph PIAPI ["pinned pi API — v0.80.10-psmfd.1"]
+        EVT["context + session_start events"]
+        CTXAPI["ctx: getContextUsage, model.contextWindow, ui.setStatus/notify"]
+        REG["registerCommand / registerFlag"]
+    end
+    subgraph DISK ["on-disk artifact (gitignored runtime)"]
+        JSON["state.json — v1: { enabled, maxResultChars }"]
+    end
+    subgraph MIRROR ["mirror (ADR-0042/0065)"]
+        TGT["mirror/targets.yml pi-context-manager (overlay, inline: [signals, state])"]
+        PIN["install.sh pin @v0.1.2"]
+    end
+    IDX --> POL
+    IDX --> PRU
+    IDX --> STA
+    PRU --> POL
+    PRU --> TYP
+    STA --> PRU
+    IDX --> SIG
+    STA --> SHS
+    IDX --> EVT
+    IDX --> CTXAPI
+    IDX --> REG
+    SHS --> JSON
+    TGT --> IDX
+    TGT -.->|"inlines a copy of"| SIG
+    TGT -.->|"inlines a copy of"| SHS
+    PIN --> TGT
+    ADR0032["ADR-0032 cache invariant"] -.-> IDX
+    ADR0030["ADR-0030 shared foundation"] -.-> SIG
+    ADR0107["ADR-0107 sibling signals consumer"] -.-> SIG
+```
+
 ## Deferred (post-v1)
 
 - **`session_before_compact` lever** — domain-aware compaction; only if the built-in summary proves too lossy.
@@ -89,11 +226,14 @@ event; pairing always preserved).
 
 ## API provenance
 
-Verified against **pi v0.79.0** (Phase 0, #328): the `context` event
-(`docs/extensions.md:609` — fires before each LLM call, deep-copied
-`event.messages`, returns `{ messages }`), `ToolResultMessage` shape
-(`docs/session-format.md`), `ctx.getContextUsage()` / `ctx.model.contextWindow`
-(via `shared/signals.ts`), `registerCommand`/`registerFlag`/`setStatus`.
+Verified against **pi v0.80.10-psmfd.1** — the `agent/vendor/pi` pin (#804;
+originally validated against pi v0.79.0 in Phase 0 #328). The API shapes are
+unchanged at the current pin: the `context` event (`docs/extensions.md`) fires
+before each LLM call, hands a deep copy of `event.messages`, and returns
+`{ messages }`; the `ToolResultMessage` shape; `ctx.getContextUsage()` /
+`ctx.model.contextWindow` (via `shared/signals.ts`);
+`registerCommand`/`registerFlag`/`setStatus`. (Doc line numbers are intentionally
+not cited — they drift as `docs/extensions.md` is edited.)
 
 ## Tests
 
@@ -104,6 +244,11 @@ VERBOSE=1 ./scripts/test-context-manager.sh
 
 Unit tests cover the elision mechanics, the freeze/gate decision, the sticky
 apply loop (including the cache-safety property — re-running over the originals
-yields a stable result), and state load/save. The structural typing runs the
-core offline without a live pi runtime; live token-reduction and cache-hit-ratio
-measurement is #338.
+yields a stable result), and state load/save (including the `maxResultBytes`
+legacy-rename back-compat). The structural typing runs the core offline without a
+live pi runtime. Live suite-wide cache-hit-ratio measurement was completed in
+**#338** (closed): the full suite achieved a **CHR of 0.73–0.87** on
+github-copilot, confirming the cached-prefix invariant holds in practice — no
+pathological prefix churn. The measurement harness (`cache-meter` +
+`scripts/analyze-cache-ratio.sh`) shipped in #348 / ADR-0034 and is reusable for
+future per-provider runs.

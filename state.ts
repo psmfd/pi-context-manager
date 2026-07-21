@@ -19,28 +19,40 @@ const NAMESPACE = "context-manager";
 // Smallest cap that can actually elide: below head+tail keep, pruneToolResult's
 // no-middle guard returns the message unchanged, so a result would be frozen as
 // "pruned" yet shipped in full. Repair any cap under this to the default.
-const MIN_RESULT_BYTES = HEAD_KEEP + TAIL_KEEP;
+const MIN_RESULT_CHARS = HEAD_KEEP + TAIL_KEEP;
 
 export interface ContextManagerState {
   /** Whether automatic elision is active (persisted toggle; `--prune` also enables). */
   readonly enabled: boolean;
-  /** A tool result whose combined text exceeds this many chars is a prune candidate. */
-  readonly maxResultBytes: number;
+  /**
+   * A tool result whose combined text exceeds this many CHARACTERS (JS string
+   * `.length`, UTF-16 code units — not bytes) is a prune candidate.
+   */
+  readonly maxResultChars: number;
 }
 
 export const DEFAULT_STATE: ContextManagerState = {
   enabled: false,
-  maxResultBytes: 12000,
+  maxResultChars: 12000,
 };
 
 export async function load(agentDir?: string): Promise<ContextManagerState> {
   const loaded = await loadState<ContextManagerState>(NAMESPACE, DEFAULT_STATE, agentDir);
+  // Back-compat: the cap was named `maxResultBytes` before it was corrected to
+  // `maxResultChars` (#804) — it always measured chars. Adopt a legacy value so
+  // an operator's tuned runtime state (and mirror consumers pinned to the old
+  // schema) is not silently reset on upgrade.
+  const legacy = loaded as ContextManagerState & { maxResultBytes?: number };
+  const cap =
+    typeof legacy.maxResultChars === "number"
+      ? legacy.maxResultChars
+      : typeof legacy.maxResultBytes === "number"
+        ? legacy.maxResultBytes
+        : DEFAULT_STATE.maxResultChars;
   // Defend against a hand-edited state file with a nonsensical or unusably-small
-  // cap (a cap below MIN_RESULT_BYTES can never elide — see its definition).
-  if (typeof loaded.maxResultBytes !== "number" || loaded.maxResultBytes < MIN_RESULT_BYTES) {
-    return { ...loaded, maxResultBytes: DEFAULT_STATE.maxResultBytes };
-  }
-  return loaded;
+  // cap (a cap below MIN_RESULT_CHARS can never elide — see its definition).
+  const repaired = cap < MIN_RESULT_CHARS ? DEFAULT_STATE.maxResultChars : cap;
+  return { enabled: loaded.enabled, maxResultChars: repaired };
 }
 
 export async function save(state: ContextManagerState, agentDir?: string): Promise<void> {
