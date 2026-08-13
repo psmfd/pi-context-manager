@@ -26,8 +26,8 @@ export function gateOpen(level: UsageLevel | null): boolean {
 }
 
 /** A tool result whose combined text exceeds the cap is a prune candidate. */
-export function isOversized(message: AnyMessage, maxResultBytes: number): boolean {
-  return isToolResult(message) && textLength(message) > maxResultBytes;
+export function isOversized(message: AnyMessage, maxResultChars: number): boolean {
+  return isToolResult(message) && textLength(message) > maxResultChars;
 }
 
 /**
@@ -35,6 +35,6 @@ export function isOversized(message: AnyMessage, maxResultBytes: number): boolea
  * message + level always yields the same treatment, which is why freezing it is
  * safe.
  */
-export function decide(message: AnyMessage, level: UsageLevel | null, maxResultBytes: number): Decision {
-  return gateOpen(level) && isOversized(message, maxResultBytes) ? "pruned" : "full";
+export function decide(message: AnyMessage, level: UsageLevel | null, maxResultChars: number): Decision {
+  return gateOpen(level) && isOversized(message, maxResultChars) ? "pruned" : "full";
 }

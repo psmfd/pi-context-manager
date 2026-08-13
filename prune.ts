@@ -33,17 +33,17 @@ export function textLength(message: ToolResultMessage): number {
 
 /**
  * Return a copy of `message` with its text content elided to a head + tail
- * excerpt when the combined text exceeds `maxResultBytes`; otherwise return the
+ * excerpt when the combined text exceeds `maxResultChars`; otherwise return the
  * message unchanged. Non-text blocks (e.g. images) are preserved. Deterministic.
  */
-export function pruneToolResult(message: ToolResultMessage, maxResultBytes: number): ToolResultMessage {
+export function pruneToolResult(message: ToolResultMessage, maxResultChars: number): ToolResultMessage {
   const joined = message.content
     .filter((b) => b.type === "text" && typeof b.text === "string")
     .map((b) => b.text as string)
     .join("\n");
 
   // Nothing to gain if it is not oversized, or the cap leaves no middle to cut.
-  if (joined.length <= maxResultBytes || joined.length <= HEAD_KEEP + TAIL_KEEP) {
+  if (joined.length <= maxResultChars || joined.length <= HEAD_KEEP + TAIL_KEEP) {
     return message;
   }
 
@@ -101,7 +101,7 @@ export interface FreezeStore {
 export function applyPrune(
   messages: ReadonlyArray<AnyMessage>,
   level: UsageLevel | null,
-  maxResultBytes: number,
+  maxResultChars: number,
   frozen: FreezeStore,
 ): PruneResult {
   const out: AnyMessage[] = [];
@@ -116,12 +116,12 @@ export function applyPrune(
     const key = message.toolCallId;
     let decision = frozen.get(key);
     if (decision === undefined) {
-      decision = decide(message, level, maxResultBytes);
+      decision = decide(message, level, maxResultChars);
       frozen.set(key, decision);
     }
     if (decision === "pruned") {
       const before = textLength(message);
-      const pruned = pruneToolResult(message, maxResultBytes);
+      const pruned = pruneToolResult(message, maxResultChars);
       const after = textLength(pruned);
       if (after < before) {
         prunedCount += 1;
